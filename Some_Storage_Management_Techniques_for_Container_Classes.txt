@@ -1,0 +1,769 @@
+ Some Storage Management Techniques for Container Classes
+
+
+                               Doug Lea
+
+                  SUNY Oswego / NY CASE Center / GNU
+
+
+Sec 1. Containers
+
+Homogeneous object container classes of various sorts are useful
+constructs in C++, perhaps moreso than in other Object-oriented
+languages.  A homogeneous object container class serves as a
+collection of objects (not pointers or references to objects), all of
+the same class (hence ``homogeneous'') and managed according to some
+kind of access discipline via an underlying data structure like a
+linked list or array.  These classes are useful means for storing
+objects in a way that allows simple traversal and other actions upon
+groups of objects all at once. They are also important because
+containers represent good opportunities for providing special storage
+management techniques for objects in a given class.
+
+First, a digression about why this is so. C++, unlike some other
+object-oriented languages, is block-structured and value-oriented. In
+Smalltalk and Eiffel, for example, all objects (except, perhaps,
+built-in integers and the like) are are maintained on the freestore,
+programmer-accessible symbols (variables) are bound to pointers to
+these freestore objects, and the storage is managed automatically via
+programmer-inaccessible run-time support facilities. Use of constructs
+approximating this strategy are obtainable in C++ via programmer
+specification, but are not the default storage policies. In C++, local
+(`auto') objects are stored on the run-time stack, symbols are bound
+directly to them, and storage management is performed via stack-based
+mark/release strategies in which enough space to hold all locals is
+allocated, all at once, upon entry to a block, and released upon exit.
+Globals (statics) have similar properties. Programmers who desire
+other access and lifetime control strategies must use the `new'
+operator in order to create objects on the freestore, and then
+explicitly manage their storage.
+
+While block-structuring accounts for a some of the efficiency and
+flexibility advantages of C++ over other languages, it is not without
+its cost. In many object-oriented applications, it can be difficult
+to use block structuring to the right effect in controlling lifetimes,
+and it is an error-prone nuisance for users to manually use the new()
+and delete() operators.
+
+Container classes offer an attractive way out of this. Besides their
+value in organizing groups of objects as data structures, they are
+perhaps the best means for ensuring that groups of objects have
+*coexistent* lifetimes. In other words, such containers serve as a way
+to extend the scope/lifetime rules of C++. Knowing that all objects
+created within some collection exist (unless explicitly removed) until
+the collection itself is destroyed can help minimize a good deal of
+awkwardness and error-seeking code. In many ways, such classes are
+extensible analogs of the ``collection'' constructs of the Euclid
+and Turing programming languages.
+
+Of course, container classes of various other kinds are important too.
+Containers holding pointers or references to objects as sets, ordered
+sequences, and so on, can be implemented using simple variations of
+some of the techniques mentioned here.
+
+Most container classes are best thought of as lending themselves to
+parameterized, generic definition. Moreover, most storage allocation
+mechanisms lend themselves quite nicely toward encapsulation as
+reusable classes, parametrized on the type of base class object they
+manage. However, since parameterization mechanisms are not yet well
+supported in C++, I'll ignore this issue, and just proceed with
+specific examples.
+
+
+Sec 2 Containers as allocators
+
+Container classes are based on some kind of internal data structure,
+such as a linked list, array, binary tree, hash table, or whatever.
+One of the reasons that containers are good locales for storage
+management is that they invariably include some kind of insertion and
+removal methods, which form natural opportunities to manage storage. A
+container's insertion method can take over all allocation,
+construction, and data-structure-attachment chores, and the removal
+method can perform data-structure-detachment, destruction, and
+deallocation.
+
+I'll discuss a few allocation strategies suitable for use in container
+classes. None of them are new. Most are variations of well-known
+methods, but implemented via a few C++-specific idioms and constructs.
+Several of these are stripped-down or specialized versions of those
+used in the GNU C++ Library. Texts by Knuth, Smith and Standish
+(listed in the References) provide further descriptions and
+bibliographies of these and other general techniques.
+
+Nearly all non-trivial storage management strategies are ``lazy'' in
+the sense that individual allocation and deallocation calls do not
+necessarily always individually obtain or reclaim system storage
+space, but that storage is ultimately managed in a safe and correct
+manner. In other words, these techniques attempt to have good
+``amortized'' performance, meaning that while any particular
+allocation or deallocation call may not be especially fast, sequences
+of them, considered together, are.
+
+As will be noted immediately upon glancing through some of the
+examples, storage management code is often, by nature, pretty ugly.
+Because storage is simultaneously treated as housing ``real'' objects
+by the user-accessible classes, but as raw chunks of memory by
+allocators, storage routines are among the few places where the use of
+pointer casts, unions, and other truly awful C++ constructs comprise
+essential and honorable programming techniques! Because of the
+trickiness and danger of storage allocation, nearly all these
+techniques should be encapsulated as reusable classes, amenable for
+off-the-shelf use by designers of new classes that require such
+allocation methods. 
+
+
+Sec 3 Setting up
+
+In order to *completely* take over the storage management for a class
+of objects, you must ensure that all instances of a class are
+allocated using the chosen management techniques. In C++ this requires
+that you disable `static' and `auto' allocation so that objects are
+never destroyed in a way that bypasses the storage manager (i.e., via
+the C++ rules that force locals or globals to be destroyed at the ends
+of their enclosing scopes). One way to arrange this is via mere
+convention: If the `new' and `delete' operators are specially
+overloaded for a class, and clients (programs using the class) agree
+to only construct instances via `new', then all is well.
+
+This convention is easy to enforce in most container classes since the
+classes usually need to ``wrap up'' objects inside of special nodes
+containing additional pointers or other information.  If these special
+nodes declare *all* data and methods private, but with the container
+class as a friend, complete control is ensured by the container class
+only constructing via `new'.
+
+I'll use a simple one-way linked list class as an example (See
+accompanying listing). The example is not a completely serious one,
+since it attempts to illustrate bits of several techniques, all at the
+same time.  The List class is roughly similar to some of the linked
+list classes described in Stroustrup's book. A List manages
+collections of Cells, which are in turn simply constructed by wrapping
+objects from the target class Item, (here just typedef'ed to float for
+purposes of illustration) along with the `next' pointers needed to
+construct linked lists. In many cases, it is a good idea to declare
+nodes like Cell as subclasses of the base types, rather than as
+unrelated classes.
+
+There is an accompanying class, Pix (for ``pseudo-index'') that is
+useful for traversing Lists, and is included in order to point out a
+few things about the impact of storage management on traversal.  The
+choice of the Pix class, and the corresponding array-like indexing
+operations, over other iterator constructs was also made in order to
+emphasize the similarity of containers to ``collection'' constructs in
+other languages, and array-based aggregates in general. They are also
+useful as surrogates for pointers. For example, if the stored objects
+contain fields that refer to other objects in the same collection,
+Pixes, rather than pointers or references may be useful.
+
+As promised, the List class takes over all allocation of Cells.  The
+Cell class cooperates with this by making all operations private, with
+class List as its only friend, and by overloading the ``placement''
+version of `operator new(size_t, void* addr)' to use the address
+supplied to it for construction. This storage address is supplied by
+the List class's allocation mechanisms. The `delete' operator is also
+made into a no-op, so that List can call the Cell destructor, without
+actually releasing storage, which List does on its own. (This is for
+illustration only, since Cells just possess no-op destructors too.)
+
+Only one simple insertion method, `prepend', and one removal method,
+`remove-front' are listed. Others are possible.  `prepend' is a
+surrogate Cell constructor, representing the only means by which a new
+Cell may be entered.  `remove_front' is similarly a surrogate Cell
+destructor.
+
+Before going any further, it's worth mentioning that the simplest,
+laziest, allocation strategy is available, without any further
+consideration: It is sometimes justifiable to do only simple
+allocation (say, via the default `new' operator), and *no* deletion at
+all!  Allocation without deallocation is always a legitimate
+alternative whenever it is known beforehand that the total number of
+objects created during the lifetime of a program cannot possibly be
+larger than the available (virtual) memory capacity of a system.
+Unfortunately, this is not a serious option for most designers of
+simple container classes like List, since, typically, the class will
+be used in a large number of unpredictably different situations, on
+machines with different amounts of memory, etc. Also, even if there
+does exist enough storage to hold all objects, failure to reclaim and
+reuse storage can often result in very poor locality of reference, 
+leading to thrashing in virtual memory environments.
+
+
+Sec 4 Storage Pools
+
+The storage management strategies for the List reside in its `pool'
+member, which provides a CellPool allocator. As discussed below, this
+allocator may or may not be shared across Lists.
+
+The CellPool allocator begins with some interesting variations of
+common strategies:
+
+First, CellPool preallocates CellChunks of memory in order to parcel
+out fixed Cell-sized pieces. This is perhaps the most commonly
+employed means for speeding up storage management. Since the sizes of
+Cells are constant, just pulling out Cell-sized slots is much faster
+than going through the slower, but more general-purpose default `new'
+operator. If more Cells are needed than are preallocated, a new
+CellChunk is obtained. The CellPool thus maintains a linked list of
+Chunks. (Surely the most confusing aspect of this example is the heavy
+overloading of the word ``next''.  Linked lists of three distinct
+sorts are maintained.)
+
+The number of slots to preallocate is left variable. This fact opens
+up the issue of how to allocate the CellChunks themselves.  One way
+would be to have each CellChunk contain a pointer to the actual space,
+which could then be separately allocated.  But it is possible to avoid
+this kind of ``double-allocation'' via the simple expedient of
+declaring that the array representing the variable part is at the
+*end* of the struct, and then allocating enough space so that it may
+be indexed beyond its declared bounds. (A small point about this: In
+ANSI C and C++, such arrays must be declared to have at least one
+element, which accounts for some adding and subtracting of ones in
+CellPool chunk construction functions).
+
+It is sometimes possible to fine-tune the actual number of slots held
+in a chunk via special knowledge of the default `new' allocator, which
+is invoked (`new char[...]') to actually obtain the space for
+CellChunks. In most versions of C++ the default `new' calls `malloc'.
+On many BSD-based Unix systems, `malloc' uses a form of
+``buddy-system'' allocation in which storage is parceled out in slots
+that have a size that is a power of two, minus some overhead bytes
+used internally by malloc. For example, if a block of 40 bytes is
+requested, one holding 64 (or probably 60, accounting for overhead) is
+returned.  You might as well request all 60 bytes, or the closest
+usable fraction thereof. The function `good_malloc_size' in the
+listing is a very system-dependent routine to perform these
+calculations. Fine-tuning allocation with respect to `malloc' is a
+somewhat easier and less machine-dependent alternative to reaching
+directly into an operating system's raw allocation primitives.
+
+Inside CellChunks, the available slots are initially linked together
+to form a freelist. Allocation then proceeds by pulling the CellSpaces
+off the freelist.
+
+Deallocation proceeds similarly. Deleted Cells are normally placed
+back on the freelist, to be reused later. However, a very useful
+optimization is also implemented: If the List possesses its own,
+unique CellPool allocator, it may kill off all storage in one fell
+swoop when either the List itself is destroyed, or when a `clear'
+operation is requested. It does this by calling the CellPool's clear
+operation, which deletes all allocated chunks.  Because it deletes all
+storage *without* invoking the destructor of each object, this
+technique *cannot* be used for objects with non-default destructors.
+
+This form of laziness is a useful analog of the mark/release strategy
+described above for C++ locals.  When the scope of normal local
+variables ends, the run-time support merely deletes the block of
+run-time stack space needed to hold them.  This analogy holds even
+better when users are able to provide good estimates of how many Cells
+will appear in a List. By specifying an appropriate preallocation
+chunk size, programmers can employ Lists *very* efficiently: all Cells
+will come out of a single CellChunk that is wiped out upon List
+destruction.
+
+Even when the contained objects posess non-default destructors,
+some degree of laziness can be arranged if the destructors have no
+real-time-critical side effects. Suppose that instead of just one
+freelist, there were two: One for Cells that have never been
+allocated, and another (the reuselist) that holds Cells that have been
+returned but not since reallocated. If such a scheme is used, then the
+destructors do *not* need to be called when a Cell is put on the
+reuselist, but can be called during the next allocation. In some
+applications, heavily dependent on the nature of the Cell destructor,
+this technique may enable Cells that end up on the reuselist when the
+entire List is destroyed to never have their destructors called at
+all.  This strategy could be implemented here by arranging that
+`newCell' call the destructor for the previously housed object
+immediately before the constructor of the returned one. Weide (see
+References) describes an Ada version of this scheme, along with some
+interesting effects and variations.
+
+Many further refinements and extensions are possible. For example, it
+is not hard arrange for different Lists to ``donate'' their CellChunks
+to each other. Consider an extension to the List class `void
+List::incorporate(List& b)' in which you wanted to append the Cells
+from `b' into the current list by destructively (to `b') stealing them
+via a few pointer manipulations rather than rebuilding Cells. This can
+be done by incorporating `b's CellChunks into the pool. This saves
+allocations for the current List, and deallocations for `b'.
+
+Sec 5 Reclaiming Chunks
+
+The chief deficiencies of this implementation are that CellChunks are
+not released when empty and that many CellChunks may provide only a
+few live Cells, creating unacceptable storage overhead. Both of these
+phenomena may occur after Lists have subjected to a large number of
+insertions and deletions.
+
+Solutions to such problems can be had via some kind of ``garbage
+collection'' technique. There are more approaches to garbage
+collection than can be even briefly summarized. However, there are a
+few methods that are particularly suitable as potential extensions to
+this example, and worth discussion.
+
+Given the design of CellPool, it would require a large amount of work
+to determine exactly where live and dead Cells are located, and to
+figure out what to do about it. Some garbage collection strategies
+focus on solutions to this dilemma. However, in many cases, it is a
+better idea is to find some means to avoid such issues all together.
+
+Sometimes, the fastest solution is to to simply *move* the live Cells
+(i.e., those part of the List) into a fresh CellChunk, and kill off
+the old CellChunks. This is a variation of ``consolidation'' or
+``stop-and-copy'' based garbage collection. In the present example,
+this could be accomplished by adding some bookkeeping to CellPool to
+determine when the number of dead Cells reaches some threshhold, and a
+means for copying the List, Cell by Cell into a new CellChunk (also
+resetting the List pointer), to be performed upon a dealloc() then the
+threshhold is reached.
+
+Consolidation is *not* a viable strategy when the Cells are
+``pinned'', that is, pointed to by other objects (including iterators
+-- see below), since all of the addresses of the Cells will be changed
+by the relocation. In a fully managed garbage-collecting environment
+like Smalltalk, the garbage collector can find the pointers to pinned
+Cells, and change them. However, this is not usually a serious
+possibility here, since some of the pointers might be statics or
+locals, thus residing just about anywhere in memory (including CPU
+registers), and posing nearly insurmountable problems for the
+allocator.  (But see Boehm's work about various heuristics that can
+still do a good job in such circumstances.)
+
+An alternative approach is to add some additional overhead to each
+allocation and deallocation that deletes CellChunks whenever they are
+empty, and that heuristically attempts to prevent fragmentation.  One
+such method that could be applied in the current example is (1) Rather
+than keeping a global free list, maintain separate freelists, and
+associated counts in each CellChunk; (2) Delete a CellChunk whenever
+it becomes empty; (3) Always allocate from the oldest (i.e.,
+frontmost) non-full CellChunk as a heuristic to minimize the number of
+``stragglers'' (Alternatively, the fullest non-full CellChunk can be
+selected, for the same reason).  The most undesirable aspect of this
+strategy is that the CellChunk list must be scanned upon each
+allocation (to find the best CellChunk) and deallocation (to find the
+CellChunk containing the address of the deleted Cell, via something
+akin to `CellChunk::owns'). However, a careful implementation of this
+strategy may be able reduce actual overhead to acceptable levels. The
+use of bit maps, rather than free lists can occasionally be useful for
+such purposes.
+
+
+Sec 6 Sharing Resources
+
+There are many situations in which the use of an independent CellPool
+allocator for each List isn't wanted or needed. For example, if there
+are many Lists declared inside a single program, there may be
+fragmentation problems stemming from the fact that each of the Lists
+is carrying around some unallocated space in its CellChunks. This
+space can add up. Or various extensions to List might be required
+in which different coextensively live Lists must *share* Cells. 
+
+It makes sense for coextensive Lists to share a CellPool allocator. It
+is easy to have the `pool's of different Lists share one CellPool, as
+implemented in one of the List constructors. It might be nice to
+create a new class that set up a group of Lists all sharing the same
+allocator. Alternatively, `pool' could be made into a `static', shared
+across all Lists ever constructed.
+
+With shared allocators, a few additional storage management tricks are
+available.  For example, if a ``reuselist'' is employed, all of the
+Cells on a cleared or destroyed List may be placed on it quickly via a
+few pointer adjustments.
+
+But when Lists share a CellPool, a new problem emerges.  The CellPool
+itself must now be managed, to determine when it is no longer required,
+and is thus deletable.
+
+There are several available strategies for managing shared resources
+like CellPools. The easiest, and usually the best, is reference
+counting.  The `refcount' in CellPool is used to keep track of how
+many Lists are using it. List constructors increment, and destructors
+decrement the count via acquire() and release(). When it is zero, the
+CellPool may be deleted. While not necessary in this example, a bit of
+safety is added into the RefCount member functions: Since it is
+implemented via a standard two's complement signed integer, the
+reference count might be incremented past the maximum positive number,
+through the negatives, and back around to zero, signifying that it is
+dead.  This is scarcely possible here, but is a real concern in common
+cases where only 1-byte, or even smaller fields are used for reference
+counts. As a safeguard, if the reference count ever wraps into being a
+negative number, it is considered `permanent', and never again
+touched, so the CellPool is never accidentally deleted.  Besides
+safety, this technique is useful in defining `global' allocators that
+are never deleted. One could be created via a constructor that
+initializes the refcount to a negative number.
+
+Reference counts are ideal means for managing ``resources'' like
+CellPools, but are often less suitable for managing the elements of
+data structures like Lists themselves. Suppose Lists supported
+operations that allowed a single Cell to appear on two or more Lists.
+One reason to do this might be to support a fast ``lazy'' copy, so
+that a List may be assigned to another by simply copying the List tail
+pointer rather than actually copying all Cells. Lisp, among many other
+languages supports such a construct. While attractive in some ways,
+supporting such a construct opens up yet further difficulties. When a
+Cell is deleted from one List, it may still appear on another. Thus
+the Cells serve as shared resources. However, it would require a
+small, but possibly important amount of time and, especially, space to
+attach a RefCount to each Cell in order to determine when it was
+surely deletable.
+
+Unfortunately, in some applications, reference counts cannot always
+identify deletable objects, since circularly dependent cycles of
+otherwise unreferenced objects may exist (as when A references B,
+which in turn references A, but neither is referenced from any live
+object).  Nothing short of a full, generic, and often slow garbage
+collection facility can overcome such problems.
+
+Decisions about whether to adopt such schemes are very often based on
+the size and complexity of the objects involved. The more time and
+space intensive it is to copy objects, the more attractive it is to
+use sharing, not out of principle, but out of the desire to minimize
+construction.  Very often, when sharing is a concern, it is a better
+idea to create two kinds of containers, the homogeneous object
+containers discussed here to house the real objects, and
+pointer-containers to maintain auxiliary sets, sequences, etc., that
+indirectly refer to either Cells or Lists.
+
+
+Sec 7 Dangling Pointers and References
+
+In any language supporting pointers and/or references, along with
+mechanisms for logically deleting objects, there is always the
+possibility that programmers may erroneously attempt to access dead
+objects via ``dangling'' pointers or references. 
+
+Among the most common examples of such problems occur in the use of
+iterators. Suppose a programmer created a List l, and then attempted
+`Pix i(l); l.remove_front(); Item x = l[i];' This is a
+less-than-obvious error: The Pix was initialized to index the front of
+the List, but the front was deleted, leaving the index dangling (In
+keeping with the array analogy for Pixes, one might think of the the
+index as suddenly becoming ``out of bounds''). This error is similar
+to the equally bad C/C++ `int* p { int a = 2; p = &x; } int x = *p'.
+In both cases, the worst aspect of the error is that the assignments
+to `x' may sometimes work ``correctly'', due to random coincidences in
+allocation strategies.
+
+There is often little that can be done by a class designer to actively
+help eliminate such errors, since few of them are even in principle
+detectable at compile-time. Because they are truly programmer errors,
+there are no real remedies for dangling pointers: The best one can do
+is reliably abort (or someday in C++, raise an exception), rather than
+allow random events to proceed.
+
+Setting up classes to detect bad pointers requires additional
+overhead.  One strategy that could be adopted in the present example
+is similar to that used in some Pascal and Modula2 compilers.  Space
+for a hidden pointer can be allocated ``in front'' of each Cell.  This
+pointer is initialized upon construction to point to the rest of the
+Cell. Whenever the Cell is accessed via an iterator, the List can
+check whether the Pix pointer and the hidden pointer agree, and if
+not, then abort. Upon deletion of a Cell, the hidden pointer can be
+set to any other value. This works well unless/until the space for the
+Cell is reclaimed for use in another Cell, in which case the Pix
+*would* be valid, but would not index the Cell that the programmer
+probably had in mind! This problem is, in turn solvable via yet
+another field in the Cell and the Pix serving as a timestamp
+indicating when the Cell was created.
+
+Another potential error that can be trapped is that of a programmer
+declaring a Pix to be used over one List, but then using it with
+another List.  This can be detected by adding a field to Pix that
+records the List over which the Pix was defined, and having the List
+methods check this.
+
+Countless further refinements are possible.  The extent to which such
+pointer errors can be handled is limited only by the time and space
+overhead that class designers and users are willing to tolerate.
+
+
+References
+
+Boehm, H., and M. Weiser, "Garbage Collection in an Uncooperative Environment",
+Software Practice & Experience, September 1988, pp. 807-820.
+
+Knuth, D. E. The Art of computer programming, Vol. 1. Addison-Wesley, 1973.
+
+Lea, D. The GNU C++ Library user's manual. Free Software Foundation, 1989.
+
+Smith, H. Data structures: Form and function. Harcourt, Brace,
+and Jovanovich, 1987.
+
+Standish, T. A.  Data structures techniques. Addison-Wesley, 1980.
+
+Stroustrup, B. The C++ programming language. Addison-Wesley, 1986.
+
+Weide, B. "A new ADT and its applications in implementing linked
+structures", Ohio State University Technical Report OSU-CISCRC-TR-86-3,
+1986.
+
+Listing Part 1, declarations
+
+#include <new.h>
+#include <stream.h>
+
+typedef float Item;
+
+class List; class Pix; class CellPool;
+
+void raze() { abort(); } // pretend to raise an exception
+
+class Cell
+{
+  friend class List;
+  void*      operator new(size_t);
+  void*      operator new(size_t, void* where);
+  void       operator delete(void*);
+
+  Cell*      next;
+  Item       item;
+             Cell(const Item& x, Cell* n);
+            ~Cell();
+};
+
+static const int default_chunksize = 2;
+
+union CellSpace { void* next; char space[sizeof(Cell)]; };
+
+class CellChunk
+{
+  friend class CellPool;
+  void*      operator new(size_t);
+  void*      operator new(size_t, void* where);
+
+  unsigned   chunksize;
+  CellChunk* next;
+  CellSpace  cell[1]; // really more!
+             CellChunk(unsigned int sz = default_chunksize);
+  void       reset();
+  void*      first();
+  void*      last();
+  int        owns(void*);
+};
+
+class Pix
+{
+  friend class List;
+  Cell*      p;
+             Pix(Cell*);
+             operator   Cell*();
+public:
+             Pix(List&);
+             Pix(const Pix&);
+  void       operator = (Pix& j);
+  int        operator == (Pix& j);
+  void       next();
+  int        nil();
+};
+
+class RefCount
+{
+  int        count;
+public:
+             RefCount(int initial = 1);
+  void       addref();
+  void       delref();
+  int        shared();
+  int        dead();
+  int        permanent();
+};
+
+class CellPool
+{
+  RefCount   refcount;
+  CellChunk* tail;
+  void*      freetail;
+  unsigned   chunksize;
+  CellChunk* newChunk(unsigned int sz);
+public:
+             CellPool(unsigned int sz);
+            ~CellPool();
+  void*      alloc();
+  void       dealloc(void*);
+  void       acquire();
+  int        shared();
+  void       release();
+  void       clear();
+};
+
+class List
+{
+  friend Pix::Pix(List&);
+
+  CellPool*  pool;
+  Cell*      last;
+
+  Cell*      first() ;
+  Cell*      newCell(const Item&, Cell*);
+  void       delCell(Cell*);
+  void       die_if_empty();
+public:
+             List(unsigned int chunksz = default_chunksize);
+             List(CellPool* p);
+            ~List();
+  int        empty() const;
+  void       prepend(const Item& x);
+  void       remove_front();
+  void       clear();
+  Item&      operator[] (Pix& i);
+  void       next(Pix& i);
+  Pix        index(const Item& x);
+};
+
+
+
+
+--------- Part 2, implementation
+
+
+inline void* Cell::operator new(size_t sz) { return new char[sz]; }
+inline void* Cell::operator new(size_t, void* p) { return p; }
+inline void  Cell::operator delete(void*) {}
+inline       Cell::Cell(const Item& x, Cell* n) :item(x), next(n) {}
+inline       Cell::~Cell() {}
+
+void         CellChunk::reset() // link all Cells into circular freelist
+{
+  for (int i = 0; i < chunksize-1; ++i) cell[i].next = (void*)(&cell[i+1]);
+  cell[chunksize-1].next = (void*)(&cell[0]);
+};
+
+inline       CellChunk::CellChunk(unsigned int sz) 
+               :chunksize(sz), next(0) { reset(); }
+inline void* CellChunk::operator new(size_t sz) { return new char[sz]; }
+inline void* CellChunk::operator new(size_t, void* p) { return p; }
+inline void* CellChunk::first() { return (void*)(&cell[0]); }
+inline void* CellChunk::last()  { return (void*)(&cell[chunksize - 1]); }
+inline int   CellChunk::owns(void* p) { return p >= first() && p <= last(); }
+
+inline       RefCount::RefCount(int initial) :count(initial) {}
+inline void  RefCount::addref() { if (count >= 0) count++; }
+inline void  RefCount::delref() { if (count >  0) count--; }
+inline int   RefCount::dead()   { return count == 0; }
+inline int   RefCount::shared() { return count != 1; }
+inline int   RefCount::permanent() { return count < 0; }
+
+unsigned int good_malloc_size(unsigned sz)
+{
+  const int malloc_overhead = 4;
+  unsigned int adjusted_size = sz + malloc_overhead;
+  unsigned int good_size = 1;
+  while (good_size < adjusted_size) good_size <<= 1;
+  return good_size - malloc_overhead;
+}
+
+CellChunk*   CellPool::newChunk(unsigned int sz)
+{
+  unsigned int chunksz = sizeof(CellChunk)+(sz-1)*sizeof(Cell);
+  unsigned int allocsz = good_malloc_size(chunksz);
+  int actualsz = (allocsz - sizeof(CellChunk)) / sizeof(Cell) + 1;
+  void* space = (void*)(new char[allocsz]);
+  return new (space) CellChunk(actualsz);
+}
+
+void*        CellPool::alloc()
+{
+  if (freetail == 0)
+  {
+    CellChunk* t = newChunk(chunksize);
+    if (tail == 0) { tail = t; tail->next = tail; }
+    else { t->next = tail->next; tail->next = t; }
+    freetail = t->last();
+  }
+  void* p = ((CellSpace*)freetail)->next;
+  if (p == freetail)
+    freetail = 0;
+  else
+    ((CellSpace*)freetail)->next = ((CellSpace*)p)->next;
+  return p;
+}
+
+void         CellPool::dealloc(void* p)
+{
+  if (freetail == 0) 
+  {
+    freetail = p; ((CellSpace*)freetail)->next = freetail;
+  }
+  else
+  {
+    ((CellSpace*)p)->next = ((CellSpace*)freetail)->next;  
+    ((CellSpace*)freetail)->next = p;
+  }
+}
+
+void         CellPool::clear()
+{
+  if (tail != 0)
+  {
+    CellChunk* t = tail;
+    do  { CellChunk* nx = t->next; delete t; t = nx; } while (t != tail);
+    tail = 0;
+    freetail = 0;
+  }
+}
+
+inline void  CellPool::acquire() { refcount.addref(); }
+inline int   CellPool::shared() { return refcount.shared(); }
+inline void  CellPool::release() 
+{
+  refcount.delref(); if (refcount.dead()) clear(); 
+}
+inline       CellPool::CellPool(unsigned int sz) 
+               :refcount(1), chunksize(sz), tail(0), freetail(0) {}
+
+inline       CellPool::~CellPool() { clear(); }
+
+inline       List::List(unsigned int chunksz) 
+               :last(0), pool(new CellPool(chunksz)) {}
+inline       List::List(CellPool* p)
+               :last(0), pool(p) { p->acquire(); }
+inline Cell* List::first() { return (last == 0)? 0 : last->next; }
+
+inline       Pix::Pix(List& lst) :p(lst.first()) { }
+inline       Pix::Pix(const Pix& i) :p(i.p) {}
+inline       Pix::Pix(Cell* ptr) :p(ptr) {}
+inline void  Pix::operator = (Pix& j) {  p = j.p; }
+inline int   Pix::operator == (Pix& j) { return p == j.p; }
+inline int   Pix::nil()  { return p == 0; }
+inline       Pix::operator Cell*() { if (p==0) raze(); return p;}
+
+inline void  List::next(Pix& i) { i.p = (i.p==0 || i.p==last)? 0 : i.p->next; }
+inline Item& List::operator[] (Pix& i) { return ((Cell*)(i))->item; }
+inline int   List::empty() const { return last == 0; }
+inline void  List::die_if_empty() { if (empty()) raze(); }
+
+inline Cell* List::newCell(const Item& x, Cell* n)
+{
+  return new (pool->alloc()) Cell(x, n);
+}
+
+inline void  List::delCell(Cell* p) { delete p; pool->dealloc(p); }
+
+void        List::prepend(const Item& x) 
+{  
+  Cell* t = newCell(x, 0);
+  if (last == 0) { last = t; last->next = last; }
+  else { t->next = last->next; last->next = t; }
+}
+
+void         List::remove_front() 
+{ 
+  die_if_empty();   
+  Cell* hd = first();
+  if (hd == last) last = 0; else last->next = hd->next;
+  delCell(hd);
+}
+
+inline void  List::clear() 
+{ 
+  if (!pool->shared())  pool->clear();
+  else { while (!empty()) remove_front(); }
+} 
+
+inline       List::~List() { if (pool->shared()) clear(); pool->release(); }
+
+Pix          List::index(const Item& x)
+{
+  Pix i(*this); while (!i.nil() && (*this)[i] != x) next(i); return i;
+}
+
